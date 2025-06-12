@@ -1,29 +1,19 @@
-# %%
+import streamlit as st
 import fitz  # PyMuPDF
 import re
 import pandas as pd
-from tkinter import Tk, filedialog
-import os
+from io import BytesIO
 
-# ========== File Dialogs ==========
-def select_pdf_file():
-    root = Tk()
-    root.withdraw()
-    file_path = filedialog.askopenfilename(filetypes=[("PDF files", "*.pdf")])
-    root.destroy()
-    return file_path
+st.set_page_config(page_title="Horizon Topic Extractor", layout="centered")
+st.title("📄 Horizon Topic Extractor")
+st.write("Upload a Horizon Europe PDF file and get an Excel sheet with parsed topics.")
 
-def save_excel_file():
-    root = Tk()
-    root.withdraw()
-    file_path = filedialog.asksaveasfilename(defaultextension=".xlsx",
-                                             filetypes=[("Excel files", "*.xlsx")])
-    root.destroy()
-    return file_path
+# ========== File Upload ==========
+uploaded_file = st.file_uploader("Upload a Horizon PDF", type=["pdf"])
 
 # ========== PDF Parsing ==========
-def extract_text_from_pdf(path):
-    with fitz.open(path) as doc:
+def extract_text_from_pdf(file):
+    with fitz.open(stream=file.read(), filetype="pdf") as doc:
         return "\n".join(page.get_text() for page in doc)
 
 # ========== Utility ==========
@@ -38,7 +28,6 @@ def normalize_text(text):
 def extract_topic_blocks(text):
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     fixed_lines = []
-
     i = 0
     while i < len(lines):
         if re.match(r"^HORIZON-[A-Z0-9\-]+:?$", lines[i]) and i + 1 < len(lines):
@@ -134,7 +123,7 @@ def extract_data_fields(topic):
                 elif line.strip():
                     title_lines.append(line.strip())
         return " ".join(title_lines) if title_lines else None
-    
+
     def extract_call_name_topic(text):
         text = normalize_text(text)
         match = re.search(r"(?i)^\s*Call:\s*(.+)$", text, re.MULTILINE)
@@ -155,58 +144,11 @@ def extract_data_fields(topic):
         )
     }
 
-# ========== Function to find nearest call info ================
-def find_nearest_call_info(text):
-    text = normalize_text(text)
-    call_info_list = []
-
-    # Same date pattern as before
-    date_pattern = re.compile(
-        r"Opening\s*[:]*\s*(\d{1,2} \w+ \d{4})\s*"
-        r"Deadline\(s\)\s*[:]*\s*([^\n]+)", re.IGNORECASE
-    )
-
-    for match in date_pattern.finditer(text):
-        opening_date = match.group(1).strip()
-        deadlines_raw = match.group(2).strip()
-
-        # Extract deadline(s)
-        deadlines = re.findall(r"\d{1,2} \w+ \d{4}", deadlines_raw)
-        deadline_1 = deadlines[0] if len(deadlines) > 0 else None
-        deadline_2 = deadlines[1] if len(deadlines) > 1 else None
-
-        # Text before the current match (search backward)
-        preceding_text = text[:match.start()]
-
-        # Stop the extraction of call name when 'HORIZON' or similar terms are encountered
-        call_match = list(re.finditer(r"Call\s*[-:]?\s*(.*?)\s*(?=HORIZON|Deadline|Opening|$)", preceding_text))
-        call_title = call_match[-1].group(1).strip() if call_match else "Unknown"
-
-        # Get last HORIZON ID before this
-        id_match = list(re.finditer(r"(HORIZON-[A-Z]+-\d{4}-[A-Za-z0-9-]+)", preceding_text))
-        call_id = id_match[-1].group(1).strip() if id_match else "Unknown"
-
-        call_info_list.append((call_title, call_id, opening_date, deadline_1, deadline_2))
-
-    return pd.DataFrame(call_info_list, columns=[
-        "Call Name", "Call ID", "Opening Date", "Deadline 1", "Deadline 2"
-    ])
-
-
-# ========== Pipeline ==========
-def run_pipeline():
-    pdf_path = select_pdf_file()
-    if not pdf_path:
-        print("❌ No file selected.")
-        return
-
-    raw_text = extract_text_from_pdf(pdf_path)
+# ========== Main Streamlit App ==========
+if uploaded_file:
+    raw_text = extract_text_from_pdf(uploaded_file)
     topic_blocks = extract_topic_blocks(raw_text)
-    print(f"✅ Found {len(topic_blocks)} topic blocks")
-
-    enriched = []
-    for topic in topic_blocks:
-        enriched.append({**topic, **extract_data_fields(topic)})
+    enriched = [{**topic, **extract_data_fields(topic)} for topic in topic_blocks]
 
     df = pd.DataFrame([{
         "Code": t["code"],
@@ -223,45 +165,14 @@ def run_pipeline():
         "Description": t.get("full_text")
     } for t in enriched])
 
-    calls_with_dates_df = find_nearest_call_info(raw_text)
+    output = BytesIO()
+    df.to_excel(output, index=False)
+    output.seek(0)
 
-    # Normalize Call Names before merge
-    df["Call Name"] = df["Call Name"].str.strip().str.lower()
-    calls_with_dates_df["Call Name"] = calls_with_dates_df["Call Name"].str.strip().str.lower()
-
-    # 🔍 Show sample call names from both dataframes
-    print("\n🔍 Sample topic-level Call Names:")
-    print(df["Call Name"].dropna().unique()[:5])
-
-    print("\n🔍 Sample date-level Call Names:")
-    print(calls_with_dates_df["Call Name"].dropna().unique()[:5])
-
-    # 🧪 Show full unmatched call names (those in df but not in calls_with_dates_df)
-    unmatched = df[~df["Call Name"].isin(calls_with_dates_df["Call Name"])]
-    print(f"\n❌ {len(unmatched)} Call Names from topic-level data had no date match.")
-    print(unmatched["Call Name"].dropna().unique()[:5])
-
-    # 🧪 Optional: also see unmatched in reverse
-    unmatched_dates = calls_with_dates_df[~calls_with_dates_df["Call Name"].isin(df["Call Name"])]
-    print(f"\n📅 {len(unmatched_dates)} date Call Names had no match in topic-level data.")
-    print(unmatched_dates["Call Name"].dropna().unique()[:5])
-
-    # 📅 See how many rows were matched
-    df_final = df.merge(calls_with_dates_df, on="Call Name", how="left")
-    print(f"\n✅ Successfully merged {df_final['Opening Date'].notnull().sum()} rows with dates.")
-
-    df_final = df.merge(calls_with_dates_df, on="Call Name", how="left")
-
-    output_path = save_excel_file()
-    if output_path:
-        df_final.to_excel(output_path, index=False)
-        print(f"✅ Saved Excel to: {output_path}")
-    else:
-        print("⚠️ Save cancelled.")
-
-# ========== Run ==========
-if __name__ == "__main__":
-    run_pipeline()
-
-
-
+    st.success(f"✅ Extracted {len(df)} topics!")
+    st.download_button(
+        label="⬇️ Download Excel File",
+        data=output,
+        file_name="horizon_topics.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
