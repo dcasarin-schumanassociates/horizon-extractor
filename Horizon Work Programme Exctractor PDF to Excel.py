@@ -147,45 +147,53 @@ def extract_data_fields(topic):
 def extract_metadata_blocks(text):
     lines = normalize_text(text).splitlines()
 
-    # Step 1: extract all date blocks and their line index
-    date_blocks = []
-    for i, line in enumerate(lines):
-        match = re.search(
-            r"Opening\s*[:]*\s*(\d{1,2} \w+ \d{4})\s*"
-            r"Deadline\(s\)\s*[:]*\s*([^\n]+)", line, re.IGNORECASE
-        )
-        if match:
-            opening = match.group(1).strip()
-            deadlines_raw = match.group(2).strip()
-            found_deadlines = re.findall(r"\d{1,2} \w+ \d{4}", deadlines_raw)
-            deadline_1 = found_deadlines[0] if len(found_deadlines) > 0 else None
-            deadline_2 = found_deadlines[1] if len(found_deadlines) > 1 else None
-
-            date_blocks.append({
-                "line": i,
-                "opening_date": opening,
-                "deadline": deadline_1 or deadline_2
-            })
-
-    # Step 2: assign topics to most recent preceding date block
     metadata_map = {}
-    current_block = None
+    current_metadata = {
+        "opening_date": None,
+        "deadline": None,
+        "destination": None
+    }
+
     topic_pattern = re.compile(r"^(HORIZON-[A-Z0-9\-]+):")
 
+    collecting = False
     for i, line in enumerate(lines):
-        if any(d["line"] == i for d in date_blocks):
-            current_block = next(d for d in date_blocks if d["line"] == i)
+        lower = line.lower()
 
-        match = topic_pattern.match(line)
-        if match and current_block:
-            code = match.group(1)
-            metadata_map[code] = {
-                "opening_date": current_block["opening_date"],
-                "deadline": current_block["deadline"],
-                "destination": None  # Still optional — could be filled in later
-            }
+        if lower.startswith("opening:"):
+            # Start new block
+            current_metadata["opening_date"] = re.search(r"(\d{1,2} \w+ \d{4})", line)
+            current_metadata["opening_date"] = (
+                current_metadata["opening_date"].group(1)
+                if current_metadata["opening_date"]
+                else None
+            )
+            current_metadata["deadline"] = None  # reset deadline for now
+            collecting = True
+
+        elif collecting and lower.startswith("deadline"):
+            current_metadata["deadline"] = re.search(r"(\d{1,2} \w+ \d{4})", line)
+            current_metadata["deadline"] = (
+                current_metadata["deadline"].group(1)
+                if current_metadata["deadline"]
+                else None
+            )
+
+        elif collecting and lower.startswith("destination"):
+            current_metadata["destination"] = line.split(":", 1)[-1].strip()
+
+        elif collecting:
+            match = topic_pattern.match(line)
+            if match:
+                code = match.group(1)
+                metadata_map[code] = current_metadata.copy()
+
+        # Reset collection mode when a new block starts
+        elif lower.startswith("opening:"):
+            collecting = True
 
     return metadata_map
+
 
 
 # ========== Main Streamlit App ==========
