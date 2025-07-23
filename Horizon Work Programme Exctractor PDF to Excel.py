@@ -144,7 +144,7 @@ def extract_data_fields(topic):
         )
     }
 
-# ========== Metadata Extraction (NEW) ==========
+# ========== Metadata Extraction ==========
 def extract_metadata_blocks(text):
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     
@@ -155,40 +155,49 @@ def extract_metadata_blocks(text):
         "destination": None
     }
 
-    topic_pattern = r"^(HORIZON-[A-Z0-9\-]+):"
+    topic_pattern = re.compile(r"^(HORIZON-[A-Z0-9\-]+):")
+    current_topics = []
 
     for line in lines:
-        lower = line.lower()
+        l = line.lower()
 
-        if lower.startswith("opening date:"):
+        if l.startswith("opening date:"):
+            # Assign metadata to existing topics
+            for topic_code in current_topics:
+                metadata_map[topic_code] = current.copy()
+            current_topics = []
             current["opening_date"] = line.split(":", 1)[-1].strip()
 
-        elif lower.startswith("deadline date:"):
+        elif l.startswith("deadline date:"):
             current["deadline"] = line.split(":", 1)[-1].strip()
 
-        elif lower.startswith("destination:"):
+        elif l.startswith("destination:"):
             current["destination"] = line.split(":", 1)[-1].strip()
 
         else:
-            match = re.match(topic_pattern, line)
+            match = topic_pattern.match(line)
             if match:
-                code = match.group(1)
-                metadata_map[code] = current.copy()
+                topic_code = match.group(1)
+                current_topics.append(topic_code)
+
+    # Final flush
+    for topic_code in current_topics:
+        metadata_map[topic_code] = current.copy()
 
     return metadata_map
 
 # ========== Main Streamlit App ==========
 if uploaded_file:
     raw_text = extract_text_from_pdf(uploaded_file)
-    
+
     topic_blocks = extract_topic_blocks(raw_text)
-    metadata_by_code = extract_metadata_blocks(raw_text)  # New metadata lookup
+    metadata_by_code = extract_metadata_blocks(raw_text)
 
     enriched = [
         {
             **topic,
             **extract_data_fields(topic),
-            **metadata_by_code.get(topic["code"], {})  # Join with metadata
+            **metadata_by_code.get(topic["code"], {})
         }
         for topic in topic_blocks
     ]
@@ -211,6 +220,9 @@ if uploaded_file:
         "Description": t.get("full_text")
     } for t in enriched])
 
+    st.subheader("📊 Preview of Extracted Topics")
+    st.dataframe(df.drop(columns=["Description"]).head(10), use_container_width=True)
+
     output = BytesIO()
     df.to_excel(output, index=False)
     output.seek(0)
@@ -222,4 +234,3 @@ if uploaded_file:
         file_name="horizon_topics.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-
