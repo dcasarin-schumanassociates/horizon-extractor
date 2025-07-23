@@ -144,15 +144,61 @@ def extract_data_fields(topic):
         )
     }
 
+# ========== Metadata Extraction (NEW) ==========
+def extract_metadata_blocks(text):
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    
+    metadata_map = {}
+    current = {
+        "opening_date": None,
+        "deadline": None,
+        "destination": None
+    }
+
+    topic_pattern = r"^(HORIZON-[A-Z0-9\-]+):"
+
+    for line in lines:
+        lower = line.lower()
+
+        if lower.startswith("opening date:"):
+            current["opening_date"] = line.split(":", 1)[-1].strip()
+
+        elif lower.startswith("deadline date:"):
+            current["deadline"] = line.split(":", 1)[-1].strip()
+
+        elif lower.startswith("destination:"):
+            current["destination"] = line.split(":", 1)[-1].strip()
+
+        else:
+            match = re.match(topic_pattern, line)
+            if match:
+                code = match.group(1)
+                metadata_map[code] = current.copy()
+
+    return metadata_map
+
 # ========== Main Streamlit App ==========
 if uploaded_file:
     raw_text = extract_text_from_pdf(uploaded_file)
+    
     topic_blocks = extract_topic_blocks(raw_text)
-    enriched = [{**topic, **extract_data_fields(topic)} for topic in topic_blocks]
+    metadata_by_code = extract_metadata_blocks(raw_text)  # New metadata lookup
+
+    enriched = [
+        {
+            **topic,
+            **extract_data_fields(topic),
+            **metadata_by_code.get(topic["code"], {})  # Join with metadata
+        }
+        for topic in topic_blocks
+    ]
 
     df = pd.DataFrame([{
         "Code": t["code"],
         "Title": t["title"],
+        "Opening Date": t.get("opening_date"),
+        "Deadline": t.get("deadline"),
+        "Destination": t.get("destination"),
         "Budget Per Project": t.get("budget_per_project"),
         "Total Budget": t.get("indicative_total_budget"),
         "Number of Projects": int(t["indicative_total_budget"] / t["budget_per_project"])
@@ -176,3 +222,4 @@ if uploaded_file:
         file_name="horizon_topics.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
