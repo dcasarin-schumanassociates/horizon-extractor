@@ -145,55 +145,48 @@ def extract_data_fields(topic):
     }
 
 def extract_metadata_blocks(text):
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    lines = normalize_text(text).splitlines()
 
+    # Step 1: extract all date blocks and their line index
+    date_blocks = []
+    for i, line in enumerate(lines):
+        match = re.search(
+            r"Opening\s*[:]*\s*(\d{1,2} \w+ \d{4})\s*"
+            r"Deadline\(s\)\s*[:]*\s*([^\n]+)", line, re.IGNORECASE
+        )
+        if match:
+            opening = match.group(1).strip()
+            deadlines_raw = match.group(2).strip()
+            found_deadlines = re.findall(r"\d{1,2} \w+ \d{4}", deadlines_raw)
+            deadline_1 = found_deadlines[0] if len(found_deadlines) > 0 else None
+            deadline_2 = found_deadlines[1] if len(found_deadlines) > 1 else None
+
+            date_blocks.append({
+                "line": i,
+                "opening_date": opening,
+                "deadline": deadline_1 or deadline_2
+            })
+
+    # Step 2: assign topics to most recent preceding date block
     metadata_map = {}
-    current = {
-        "opening_date": None,
-        "deadline": None,
-        "destination": None
-    }
-
+    current_block = None
     topic_pattern = re.compile(r"^(HORIZON-[A-Z0-9\-]+):")
-    block_metadata = {}
-    collecting_topics = False
-    buffered_topic_codes = []
 
-    for line in lines:
-        l = line.lower()
+    for i, line in enumerate(lines):
+        if any(d["line"] == i for d in date_blocks):
+            current_block = next(d for d in date_blocks if d["line"] == i)
 
-        # Start of new metadata block
-        if l.startswith("opening date:"):
-            # Save the previous block's metadata
-            for topic_code in buffered_topic_codes:
-                metadata_map[topic_code] = block_metadata.copy()
-            buffered_topic_codes = []  # Reset topic list
-
-            # Start new block
-            block_metadata = {
-                "opening_date": line.split(":", 1)[-1].strip(),
-                "deadline": None,
-                "destination": None
+        match = topic_pattern.match(line)
+        if match and current_block:
+            code = match.group(1)
+            metadata_map[code] = {
+                "opening_date": current_block["opening_date"],
+                "deadline": current_block["deadline"],
+                "destination": None  # Still optional — could be filled in later
             }
-            collecting_topics = True
-
-        elif l.startswith("deadline date:"):
-            block_metadata["deadline"] = line.split(":", 1)[-1].strip()
-
-        elif l.startswith("destination:"):
-            block_metadata["destination"] = line.split(":", 1)[-1].strip()
-
-        elif collecting_topics:
-            match = topic_pattern.match(line)
-            if match:
-                topic_code = match.group(1)
-                buffered_topic_codes.append(topic_code)
-
-    # Final flush in case the last block reaches EOF
-    for topic_code in buffered_topic_codes:
-        metadata_map[topic_code] = block_metadata.copy()
 
     return metadata_map
+
 
 # ========== Main Streamlit App ==========
 if uploaded_file:
