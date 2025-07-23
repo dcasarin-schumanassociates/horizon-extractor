@@ -144,10 +144,9 @@ def extract_data_fields(topic):
         )
     }
 
-# ========== Metadata Extraction ==========
 def extract_metadata_blocks(text):
     lines = [l.strip() for l in text.splitlines() if l.strip()]
-    
+
     metadata_map = {}
     current = {
         "opening_date": None,
@@ -156,33 +155,43 @@ def extract_metadata_blocks(text):
     }
 
     topic_pattern = re.compile(r"^(HORIZON-[A-Z0-9\-]+):")
-    current_topics = []
+    block_metadata = {}
+    collecting_topics = False
+    buffered_topic_codes = []
 
     for line in lines:
         l = line.lower()
 
+        # Start of new metadata block
         if l.startswith("opening date:"):
-            # Assign metadata to existing topics
-            for topic_code in current_topics:
-                metadata_map[topic_code] = current.copy()
-            current_topics = []
-            current["opening_date"] = line.split(":", 1)[-1].strip()
+            # Save the previous block's metadata
+            for topic_code in buffered_topic_codes:
+                metadata_map[topic_code] = block_metadata.copy()
+            buffered_topic_codes = []  # Reset topic list
+
+            # Start new block
+            block_metadata = {
+                "opening_date": line.split(":", 1)[-1].strip(),
+                "deadline": None,
+                "destination": None
+            }
+            collecting_topics = True
 
         elif l.startswith("deadline date:"):
-            current["deadline"] = line.split(":", 1)[-1].strip()
+            block_metadata["deadline"] = line.split(":", 1)[-1].strip()
 
         elif l.startswith("destination:"):
-            current["destination"] = line.split(":", 1)[-1].strip()
+            block_metadata["destination"] = line.split(":", 1)[-1].strip()
 
-        else:
+        elif collecting_topics:
             match = topic_pattern.match(line)
             if match:
                 topic_code = match.group(1)
-                current_topics.append(topic_code)
+                buffered_topic_codes.append(topic_code)
 
-    # Final flush
-    for topic_code in current_topics:
-        metadata_map[topic_code] = current.copy()
+    # Final flush in case the last block reaches EOF
+    for topic_code in buffered_topic_codes:
+        metadata_map[topic_code] = block_metadata.copy()
 
     return metadata_map
 
