@@ -161,14 +161,13 @@ def extract_metadata_blocks(text):
         lower = line.lower()
 
         if lower.startswith("opening:"):
-            # Start new block
             current_metadata["opening_date"] = re.search(r"(\d{1,2} \w+ \d{4})", line)
             current_metadata["opening_date"] = (
                 current_metadata["opening_date"].group(1)
                 if current_metadata["opening_date"]
                 else None
             )
-            current_metadata["deadline"] = None  # reset deadline for now
+            current_metadata["deadline"] = None
             collecting = True
 
         elif collecting and lower.startswith("deadline"):
@@ -188,13 +187,7 @@ def extract_metadata_blocks(text):
                 code = match.group(1)
                 metadata_map[code] = current_metadata.copy()
 
-        # Reset collection mode when a new block starts
-        elif lower.startswith("opening:"):
-            collecting = True
-
     return metadata_map
-
-
 
 # ========== Main Streamlit App ==========
 if uploaded_file:
@@ -233,6 +226,20 @@ if uploaded_file:
     st.subheader("📊 Preview of Extracted Topics")
     st.dataframe(df.drop(columns=["Description"]).head(10), use_container_width=True)
 
+    # ========== 🔍 New Word Search ==========
+    st.subheader("🔍 Search Topics by Keyword")
+    keyword = st.text_input("Enter keyword to filter topics:")
+
+    if keyword:
+        keyword = keyword.lower()
+        filtered_df = df[df.apply(lambda row: row.astype(str).str.lower().str.contains(keyword).any(), axis=1)]
+        filtered_df = filtered_df.drop_duplicates()
+
+        st.markdown(f"**Results containing keyword: `{keyword}`**")
+        st.dataframe(filtered_df.drop(columns=["Description"]), use_container_width=True)
+        st.write(f"🔎 Found {len(filtered_df)} matching topics.")
+
+    # ========== Download ==========
     output = BytesIO()
     df.to_excel(output, index=False)
     output.seek(0)
