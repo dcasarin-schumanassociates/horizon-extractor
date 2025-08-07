@@ -3,25 +3,37 @@ import fitz  # PyMuPDF
 import re
 import pandas as pd
 from io import BytesIO
+from datetime import datetime
 
+# ========== Page Config ==========
 st.set_page_config(page_title="Horizon Topic Extractor", layout="wide")
-st.title("📄 Horizon Europe Topic Extractor Dashboard")
+st.title("📄 Horizon Topic Extractor")
+st.write("Upload a Horizon Europe PDF file and explore topics with filters and keyword search.")
 
 # ========== File Upload ==========
 uploaded_file = st.file_uploader("Upload a Horizon PDF", type=["pdf"])
 
-# ========== PDF Text Extraction ==========
+
+# ========== Text Cleanup ==========
+def clean_section_text(text):
+    text = re.sub(r'\n{2,}', '\n', text)  # Collapse excessive newlines
+    text = re.sub(r'[ \t]+', ' ', text)   # Normalize whitespace
+    text = text.strip()
+    return text
+
+
+# ========== PDF Parsing ==========
 def extract_text_from_pdf(file):
     with fitz.open(stream=file.read(), filetype="pdf") as doc:
         return "\n".join(page.get_text() for page in doc)
 
-# ========== Utility ==========
 def normalize_text(text):
     text = text.replace('\r\n', '\n').replace('\r', '\n')
     text = re.sub(r"\xa0", " ", text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n+", "\n", text)
     return text.strip()
+
 
 # ========== Topic Extraction ==========
 def extract_topic_blocks(text):
@@ -65,6 +77,7 @@ def extract_topic_blocks(text):
 
     return topic_blocks
 
+
 # ========== Field Extraction ==========
 def extract_data_fields(topic):
     text = normalize_text(topic["full_text"])
@@ -95,7 +108,7 @@ def extract_data_fields(topic):
                 break
             elif collecting:
                 section.append(line)
-        return "\n".join(section).strip() if section else None
+        return clean_section_text("\n".join(section)) if section else None
 
     def extract_type_of_action(text):
         lines = text.splitlines()
@@ -106,6 +119,23 @@ def extract_data_fields(topic):
                         return lines[j].strip()
         return None
 
+    def extract_topic_title(text):
+        lines = text.strip().splitlines()
+        title_lines = []
+        found = False
+        for line in lines:
+            if not found:
+                match = re.match(r"^(HORIZON-[A-Za-z0-9-]+):\s*(.*)", line)
+                if match:
+                    found = True
+                    title_lines.append(match.group(2).strip())
+            else:
+                if re.match(r"^\s*Call[:\-]", line, re.IGNORECASE):
+                    break
+                elif line.strip():
+                    title_lines.append(line.strip())
+        return " ".join(title_lines) if title_lines else None
+
     def extract_call_name_topic(text):
         text = normalize_text(text)
         match = re.search(r"(?i)^\s*Call:\s*(.+)$", text, re.MULTILINE)
@@ -113,29 +143,17 @@ def extract_data_fields(topic):
             return match.group(1).strip()
         return None
 
-    def extract_trl(text):
-        match = re.search(r"TRL\s*(\d+)[^\d]*(\d+)?", text, re.IGNORECASE)
-        if match:
-            return f"{match.group(1)}-{match.group(2)}" if match.group(2) else match.group(1)
-        return None
-
-    def clean_text_section(text):
-        if not text:
-            return None
-        text = re.sub(r"\n{2,}", "\n", text)
-        text = re.sub(r" {2,}", " ", text)
-        text = text.strip().replace("\n", "  \n")  # for markdown line breaks
-        return text
-
     return {
+        "title": extract_topic_title(text),
         "budget_per_project": extract_budget(text),
         "indicative_total_budget": extract_total_budget(text),
         "type_of_action": extract_type_of_action(text),
-        "expected_outcome": clean_text_section(get_section("expected outcome:", ["scope:", "objective:", "expected impact:", "eligibility:", "budget"])),
-        "scope": clean_text_section(get_section("scope:", ["objective:", "expected outcome:", "expected impact:", "budget"])),
+        "expected_outcome": get_section("expected outcome:", ["scope:", "objective:", "expected impact:", "eligibility:", "budget"]),
+        "scope": get_section("scope:", ["objective:", "expected outcome:", "expected impact:", "budget"]),
         "call": extract_call_name_topic(text),
-        "trl": extract_trl(text),
-        "full_text": clean_text_section(topic["full_text"])
+        "trl": (m := re.search(r"TRL\s*(\d+)[^\d]*(\d+)?", text, re.IGNORECASE)) and (
+            f"{m.group(1)}-{m.group(2)}" if m.group(2) else m.group(1)
+        )
     }
 
 def extract_metadata_blocks(text):
@@ -144,42 +162,127 @@ def extract_metadata_blocks(text):
     current_metadata = {"opening_date": None, "deadline": None, "destination": None}
     topic_pattern = re.compile(r"^(HORIZON-[A-Z0-9\-]+):")
     collecting = False
-
     for i, line in enumerate(lines):
         lower = line.lower()
-
         if lower.startswith("opening:"):
-            match = re.search(r"(\d{1,2} \w+ \d{4})", line)
-            current_metadata["opening_date"] = match.group(1) if match else None
+            current_metadata["opening_date"] = re.search(r"(\d{1,2} \w+ \d{4})", line)
+            current_metadata["opening_date"] = (
+                current_metadata["opening_date"].group(1)
+                if current_metadata["opening_date"]
+                else None
+            )
+            current_metadata["deadline"] = None
             collecting = True
-
         elif collecting and lower.startswith("deadline"):
-            match = re.search(r"(\d{1,2} \w+ \d{4})", line)
-            current_metadata["deadline"] = match.group(1) if match else None
-
+            current_metadata["deadline"] = re.search(r"(\d{1,2} \w+ \d{4})", line)
+            current_metadata["deadline"] = (
+                current_metadata["deadline"].group(1)
+                if current_metadata["deadline"]
+                else None
+            )
         elif collecting and lower.startswith("destination"):
             current_metadata["destination"] = line.split(":", 1)[-1].strip()
-
         elif collecting:
             match = topic_pattern.match(line)
             if match:
                 code = match.group(1)
                 metadata_map[code] = current_metadata.copy()
-
     return metadata_map
 
-# ========== Main ==========
+
+# ========== Main App ==========
 if uploaded_file:
     raw_text = extract_text_from_pdf(uploaded_file)
     topic_blocks = extract_topic_blocks(raw_text)
     metadata_by_code = extract_metadata_blocks(raw_text)
 
-    enriched = []
-    for topic in topic_blocks:
-        data_fields = extract_data_fields(topic)
-        enriched.append({
-            "code": topic["code"],
-            "title": topic["title"],
-            **data_fields,
-            **metadata_by_code.get**
+    enriched = [
+        {
+            **topic,
+            **extract_data_fields(topic),
+            **metadata_by_code.get(topic["code"], {})
+        }
+        for topic in topic_blocks
+    ]
 
+    df = pd.DataFrame([{
+        "Code": t["code"],
+        "Title": t["title"],
+        "Opening Date": t.get("opening_date"),
+        "Deadline": t.get("deadline"),
+        "Destination": t.get("destination"),
+        "Budget Per Project": t.get("budget_per_project"),
+        "Total Budget": t.get("indicative_total_budget"),
+        "Number of Projects": int(t["indicative_total_budget"] / t["budget_per_project"])
+            if t.get("budget_per_project") and t.get("indicative_total_budget") else None,
+        "Type of Action": t.get("type_of_action"),
+        "TRL": t.get("trl"),
+        "Call Name": t.get("call"),
+        "Expected Outcome": t.get("expected_outcome"),
+        "Scope": t.get("scope"),
+        "Description": clean_section_text(t.get("full_text", ""))
+    } for t in enriched])
+
+    # ========== Interface Tabs ==========
+    tab1, tab2, tab3 = st.tabs(["🔍 Keyword Search", "📊 Dashboard Filters", "📋 Full Data"])
+
+    with tab1:
+        st.subheader("🔎 Search Topics by Keyword")
+        keyword = st.text_input("Enter keyword to filter topics:")
+        if keyword:
+            keyword = keyword.lower()
+            filtered_df = df[df.apply(lambda row: row.astype(str).str.lower().str.contains(keyword).any(), axis=1)]
+            st.write(f"Found {len(filtered_df)} matching topics.")
+            st.dataframe(filtered_df.drop(columns=["Description"]), use_container_width=True)
+
+    with tab2:
+        st.subheader("📊 Filter by Fields")
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            type_filter = st.multiselect("Type of Action", options=df["Type of Action"].dropna().unique())
+        with col2:
+            call_filter = st.multiselect("Call Name", options=df["Call Name"].dropna().unique())
+        with col3:
+            trl_filter = st.multiselect("TRL", options=df["TRL"].dropna().unique())
+
+        budget_range = st.slider("Budget Per Project (EUR)", 0, int(df["Budget Per Project"].dropna().max() or 100_000_000), (0, int(df["Budget Per Project"].dropna().max() or 100_000_000)), step=100000)
+
+        # Apply filters
+        filtered = df.copy()
+        if type_filter:
+            filtered = filtered[filtered["Type of Action"].isin(type_filter)]
+        if call_filter:
+            filtered = filtered[filtered["Call Name"].isin(call_filter)]
+        if trl_filter:
+            filtered = filtered[filtered["TRL"].isin(trl_filter)]
+        filtered = filtered[
+            (filtered["Budget Per Project"].fillna(0) >= budget_range[0]) &
+            (filtered["Budget Per Project"].fillna(0) <= budget_range[1])
+        ]
+
+        st.markdown(f"**{len(filtered)} topics match your filters.**")
+        st.dataframe(filtered.drop(columns=["Description"]), use_container_width=True)
+
+    with tab3:
+        st.subheader("📋 Complete Topics Table")
+        for _, row in df.iterrows():
+            with st.expander(f"{row['Code']} - {row['Title']}"):
+                st.markdown(f"**Type of Action:** {row['Type of Action']}")
+                st.markdown(f"**Call Name:** {row['Call Name']}")
+                st.markdown(f"**TRL:** {row['TRL']}")
+                st.markdown(f"**Expected Outcome:**\n\n{row['Expected Outcome']}")
+                st.markdown(f"**Scope:**\n\n{row['Scope']}")
+                st.markdown(f"**Full Description:**\n\n{row['Description']}")
+
+    # ========== Excel Export ==========
+    output = BytesIO()
+    df.to_excel(output, index=False)
+    output.seek(0)
+
+    st.download_button(
+        label="⬇️ Download Excel File",
+        data=output,
+        file_name="horizon_topics.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
