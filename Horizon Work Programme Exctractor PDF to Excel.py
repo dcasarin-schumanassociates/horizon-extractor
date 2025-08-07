@@ -246,6 +246,17 @@ if uploaded_file:
         with col3:
             trl_filter = st.multiselect("TRL", options=df["TRL"].dropna().unique())
 
+        # Handle potential NaN in budget column
+        max_budget = df["Budget Per Project"].dropna().max()
+        max_budget_int = int(max_budget) if pd.notna(max_budget) else 100_000_000
+
+        budget_range = st.slider(
+            "Budget Per Project (EUR)",
+            0,
+            max_budget_int,
+            (0, max_budget_int),
+            step=100000
+        )
         budget_range = st.slider("Budget Per Project (EUR)", 0, int(df["Budget Per Project"].dropna().max() or 100_000_000), (0, int(df["Budget Per Project"].dropna().max() or 100_000_000)), step=100000)
 
         # Apply filters
