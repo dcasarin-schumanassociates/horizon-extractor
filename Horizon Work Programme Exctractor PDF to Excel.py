@@ -71,18 +71,43 @@ def extract_data_fields(topic):
     text = normalize_text(topic["full_text"])
 
     def extract_budget(text):
-        match = re.search(r"around\s+eur\s+([\d.,]+)", text.lower())
-        if match:
-            return int(float(match.group(1).replace(",", "")) * 1_000_000)
-        match = re.search(r"between\s+eur\s+[\d.,]+\s+and\s+([\d.,]+)", text.lower())
-        if match:
-            return int(float(match.group(1).replace(",", "")) * 1_000_000)
-        return None
+    # Pattern 1: "Budget per project: EUR 3,000,000"
+    match = re.search(r"budget per project.*?EUR\s*([\d.,]+)", text, re.IGNORECASE)
+    if match:
+        return float(match.group(1).replace(",", ""))
+
+    # Pattern 2: "Around EUR 3.5"
+    match = re.search(r"around\s+eur\s+([\d.,]+)", text.lower())
+    if match:
+        return float(match.group(1).replace(",", "")) * 1_000_000
+
+    # Pattern 3: "Between EUR 2.5 and 4.5"
+    match = re.search(r"between\s+eur\s+[\d.,]+\s+and\s+([\d.,]+)", text.lower())
+    if match:
+        return float(match.group(1).replace(",", "")) * 1_000_000
+
+    return None
+
 
     def extract_total_budget(text):
-        match = re.search(r"indicative budget.*?eur\s?([\d.,]+)", text.lower())
-        return int(float(match.group(1).replace(",", "")) * 1_000_000) if match else None
+    # Case 1: already formatted number like "EUR 15,000,000"
+    match = re.search(r"indicative budget.*?eur\s?([\d.,]+)", text, re.IGNORECASE)
+    if match:
+        amount = match.group(1).replace(",", "")
+        return float(amount)
 
+    # Case 2: approximate in millions, e.g. "indicative budget of around EUR 35 million"
+    match = re.search(r"indicative budget.*?around\s+eur\s+([\d.,]+)", text.lower())
+    if match:
+        return float(match.group(1).replace(",", "")) * 1_000_000
+
+    # Case 3: fallback - general "total budget" mention
+    match = re.search(r"total (?:indicative )?budget.*?eur\s*([\d.,]+)", text, re.IGNORECASE)
+    if match:
+        return float(match.group(1).replace(",", ""))
+
+    return None
+    
     def get_section(keyword, stop_keywords):
         lines = text.splitlines()
         collecting = False
@@ -251,3 +276,4 @@ if uploaded_file:
         file_name="horizon_topics.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
