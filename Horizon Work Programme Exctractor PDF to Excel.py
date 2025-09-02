@@ -2,7 +2,7 @@
 from __future__ import annotations
 import re
 from io import BytesIO
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 import fitz  # PyMuPDF
 import pandas as pd
 
@@ -35,13 +35,13 @@ def extract_topic_blocks(text: str) -> List[Dict[str, Any]]:
     topic_pattern = r"^(HORIZON-[A-Za-z0-9\-]+):\s*(.*)$"
     candidate_topics = []
     for i, line in enumerate(fixed_lines):
-        m = re.match(topic_pattern, line)
-        if m:
+        match = re.match(topic_pattern, line)
+        if match:
             lookahead_text = "\n".join(fixed_lines[i+1:i+20]).lower()
             if any(key in lookahead_text for key in ["call:", "type of action"]):
                 candidate_topics.append({
-                    "code": m.group(1),
-                    "title": m.group(2).strip(),
+                    "code": match.group(1),
+                    "title": match.group(2).strip(),
                     "start_line": i
                 })
 
@@ -58,13 +58,14 @@ def extract_topic_blocks(text: str) -> List[Dict[str, Any]]:
             "title": topic["title"],
             "full_text": "\n".join(fixed_lines[start:end]).strip()
         })
+
     return topic_blocks
 
 # ========== Field Extraction ==========
 def extract_data_fields(topic: Dict[str, Any]) -> Dict[str, Any]:
     text = normalize_text(topic["full_text"])
 
-    def extract_budget(txt: str) -> Optional[int]:
+    def extract_budget(txt: str):
         m = re.search(r"around\s+eur\s+([\d.,]+)", txt.lower())
         if m:
             return int(float(m.group(1).replace(",", "")) * 1_000_000)
@@ -73,11 +74,11 @@ def extract_data_fields(topic: Dict[str, Any]) -> Dict[str, Any]:
             return int(float(m.group(1).replace(",", "")) * 1_000_000)
         return None
 
-    def extract_total_budget(txt: str) -> Optional[int]:
+    def extract_total_budget(txt: str):
         m = re.search(r"indicative budget.*?eur\s?([\d.,]+)", txt.lower())
         return int(float(m.group(1).replace(",", "")) * 1_000_000) if m else None
 
-    def get_section(keyword: str, stop_keywords: List[str]) -> Optional[str]:
+    def get_section(keyword: str, stop_keywords: List[str]):
         lines = text.splitlines()
         collecting = False
         section = []
@@ -92,7 +93,7 @@ def extract_data_fields(topic: Dict[str, Any]) -> Dict[str, Any]:
                 section.append(line)
         return "\n".join(section).strip() if section else None
 
-    def extract_type_of_action(txt: str) -> Optional[str]:
+    def extract_type_of_action(txt: str):
         lines = txt.splitlines()
         for i, line in enumerate(lines):
             if "type of action" in line.lower():
@@ -101,7 +102,7 @@ def extract_data_fields(topic: Dict[str, Any]) -> Dict[str, Any]:
                         return lines[j].strip()
         return None
 
-    def extract_topic_title(txt: str) -> Optional[str]:
+    def extract_topic_title(txt: str):
         lines = txt.strip().splitlines()
         title_lines = []
         found = False
@@ -118,10 +119,12 @@ def extract_data_fields(topic: Dict[str, Any]) -> Dict[str, Any]:
                     title_lines.append(line.strip())
         return " ".join(title_lines) if title_lines else None
 
-    def extract_call_name_topic(txt: str) -> Optional[str]:
+    def extract_call_name_topic(txt: str):
         txt = normalize_text(txt)
         m = re.search(r"(?i)^\s*Call:\s*(.+)$", txt, re.MULTILINE)
-        return m.group(1).strip() if m else None
+        if m:
+            return m.group(1).strip()
+        return None
 
     return {
         "title": extract_topic_title(text),
@@ -136,83 +139,97 @@ def extract_data_fields(topic: Dict[str, Any]) -> Dict[str, Any]:
         )
     }
 
-# ========== Metadata (Opening + multi-deadline) ==========
-_DATE_LABEL_PAIR = re.compile(
-    r"(\d{1,2}\s+\w+\s+\d{4})"          # date, e.g., 23 Sep 2025
-    r"(?:\s*\(([^)]+)\))?"              # optional label in parentheses, e.g., (First Stage)
-)
-
-def _parse_deadlines(line: str) -> Dict[str, Optional[str]]:
-    """
-    Handles:
-      'Deadline: 15 Oct 2025'
-      'Deadlines: 23 Sep 2025 (First Stage), 14 Apr 2026 (Second Stage)'
-      'Deadline(s): ...'
-    Returns dict with deadline1, deadline1_label, deadline2, deadline2_label (strings as found).
-    """
-    results = _DATE_LABEL_PAIR.findall(line)
-    d1 = l1 = d2 = l2 = None
-    if results:
-        if len(results) >= 1:
-            d1, l1 = results[0][0], (results[0][1] or None)
-        if len(results) >= 2:
-            d2, l2 = results[1][0], (results[1][1] or None)
-    return {
-        "deadline1": d1,
-        "deadline1_label": l1,
-        "deadline2": d2,
-        "deadline2_label": l2,
-    }
-
+# ========== Metadata (Opening / Deadlines / Destination) ==========
 def extract_metadata_blocks(text: str) -> Dict[str, Dict[str, Any]]:
+    """
+    Keeps single-deadline behaviour but writes into 'deadline1'.
+    Also detects two-stage forms like:
+      'Deadline(s): 23 Sep 2025 (First Stage), 14 Apr 2026 (Second Stage)'
+    and fills deadline1 / deadline2 accordingly.
+    """
     lines = normalize_text(text).splitlines()
 
     metadata_map: Dict[str, Dict[str, Any]] = {}
     current = {
         "opening_date": None,
         "deadline1": None,
-        "deadline1_label": None,
         "deadline2": None,
-        "deadline2_label": None,
         "destination": None
     }
 
     topic_pattern = re.compile(r"^(HORIZON-[A-Z0-9\-]+):")
+
+    # Header variants (lenient startswith)
+    def is_opening(line: str) -> bool:
+        return line.lower().startswith(("opening:", "opening date:", "opens:"))
+
+    def is_deadline(line: str) -> bool:
+        return line.lower().startswith(("deadline", "deadlines", "deadline(s):", "cut-off", "cut off"))
+
+    def is_destination(line: str) -> bool:
+        return line.lower().startswith("destination")
+
+    # Date patterns
+    months = r"Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t|tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?"
+    date_wordy = re.compile(rf"\b(\d{{1,2}})\s+({months})\s+(\d{{4}})\b", re.IGNORECASE)   # 23 Sep 2025 / 23 September 2025
+    date_iso   = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")                                 # 2025-09-23
+    date_slash = re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b")                             # 23/09/2025
+
+    def find_dates(s: str) -> List[str]:
+        out: List[str] = []
+        out += [f"{d} {m} {y}" for d, m, y in date_wordy.findall(s)]
+        out += [f"{y}-{m}-{d}" for y, m, d in date_iso.findall(s)]
+        for d, m, y in date_slash.findall(s):  # assume dd/mm/yyyy
+            out.append(f"{int(y):04d}-{int(m):02d}-{int(d):02d}")
+        # de-dup preserve order
+        seen = set()
+        dedup = []
+        for v in out:
+            if v not in seen:
+                seen.add(v)
+                dedup.append(v)
+        return dedup
+
     collecting = False
     for line in lines:
-        lower = line.lower()
-
-        if lower.startswith("opening:"):
-            m = re.search(r"(\d{1,2} \w+ \d{4})", line)
-            current["opening_date"] = m.group(1) if m else None
-            # reset deadlines when we see a new 'Opening:'
-            current["deadline1"] = current["deadline1_label"] = None
-            current["deadline2"] = current["deadline2_label"] = None
+        if is_opening(line):
+            dates = find_dates(line)
+            current["opening_date"] = dates[0] if dates else None
             collecting = True
+            continue
 
-        elif collecting and lower.startswith("deadline"):
-            # covers 'deadline', 'deadlines', 'deadline(s)'
-            dl = _parse_deadlines(line)
-            # fill first, then second if present
-            current.update(dl)
+        if is_deadline(line):
+            dates = find_dates(line)
+            # Keep legacy "one deadline" behaviour as Deadline1
+            current["deadline1"] = dates[0] if dates else None
+            # If a second date is present (two-stage), capture as Deadline2
+            current["deadline2"] = dates[1] if len(dates) > 1 else None
+            collecting = True
+            continue
 
-        elif collecting and lower.startswith("destination"):
+        if is_destination(line):
             current["destination"] = line.split(":", 1)[-1].strip()
+            collecting = True
+            continue
 
-        elif collecting:
-            match = topic_pattern.match(line)
-            if match:
-                code = match.group(1)
-                metadata_map[code] = current.copy()
+        if collecting:
+            m = topic_pattern.match(line)
+            if m:
+                code = m.group(1)
+                metadata_map[code] = {
+                    "opening_date": current.get("opening_date"),
+                    "deadline1": current.get("deadline1"),
+                    "deadline2": current.get("deadline2"),
+                    "destination": current.get("destination"),
+                }
 
     return metadata_map
 
 # ========== Public API ==========
 def parse_pdf(file_like, *, source_filename: str = "", version_label: str = "Unknown", parsed_on_utc: str = "") -> pd.DataFrame:
     """
-    Returns a DataFrame like your current output, but with:
-      - 'Deadline 1' and 'Deadline 2' columns (labels optional)
-      - Legacy 'Deadline' kept (equal to 'Deadline 1') for compatibility
+    Returns a DataFrame equivalent to your app's output,
+    but with 'Deadline1' and 'Deadline2' columns.
     """
     pdf_bytes = file_like.read()
     raw_text = extract_text_from_pdf(BytesIO(pdf_bytes))
@@ -229,38 +246,26 @@ def parse_pdf(file_like, *, source_filename: str = "", version_label: str = "Unk
         for topic in topic_blocks
     ]
 
-    rows = []
-    for t in enriched:
-        deadline1 = t.get("deadline1")
-        deadline2 = t.get("deadline2")
-        rows.append({
-            "Code": t["code"],
-            "Title": t["title"],
-            "Opening Date": t.get("opening_date"),
-            # NEW multi-stage fields
-            "Deadline 1": deadline1,
-            "Deadline 1 Label": t.get("deadline1_label"),
-            "Deadline 2": deadline2,
-            "Deadline 2 Label": t.get("deadline2_label"),
-            # Legacy single deadline (kept = Deadline 1)
-            "Deadline": deadline1,
-            "Destination": t.get("destination"),
-            "Budget Per Project": t.get("budget_per_project"),
-            "Total Budget": t.get("indicative_total_budget"),
-            "Number of Projects": int(t["indicative_total_budget"] / t["budget_per_project"])
-                if t.get("budget_per_project") and t.get("indicative_total_budget") else None,
-            "Type of Action": t.get("type_of_action"),
-            "TRL": t.get("trl"),
-            "Call Name": t.get("call"),
-            "Expected Outcome": t.get("expected_outcome"),
-            "Scope": t.get("scope"),
-            "Description": t.get("full_text"),
-            "Source Filename": source_filename,
-            "Version Label": version_label,
-            "Parsed On (UTC)": parsed_on_utc,
-        })
-
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame([{
+        "Code": t["code"],
+        "Title": t["title"],
+        "Opening Date": t.get("opening_date"),
+        "Deadline1": t.get("deadline1"),           # ← single or first deadline
+        "Deadline2": t.get("deadline2"),           # ← second deadline when present
+        "Destination": t.get("destination"),
+        "Budget Per Project": t.get("budget_per_project"),
+        "Total Budget": t.get("indicative_total_budget"),
+        "Number of Projects": int(t["indicative_total_budget"] / t["budget_per_project"])
+            if t.get("budget_per_project") and t.get("indicative_total_budget") else None,
+        "Type of Action": t.get("type_of_action"),
+        "TRL": t.get("trl"),
+        "Call Name": t.get("call"),
+        "Expected Outcome": t.get("expected_outcome"),
+        "Scope": t.get("scope"),
+        "Description": t.get("full_text"),
+        "Source Filename": source_filename,
+        "Version Label": version_label,
+        "Parsed On (UTC)": parsed_on_utc,
+    } for t in enriched])
 
     return df
-
