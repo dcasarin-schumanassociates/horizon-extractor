@@ -1,18 +1,23 @@
-# parsers/horizon.py
-from __future__ import annotations
-import re
-from io import BytesIO
-from typing import Dict, Any, List
+import streamlit as st
 import fitz  # PyMuPDF
+import re
 import pandas as pd
+from io import BytesIO
+
+st.set_page_config(page_title="Horizon Topic Extractor", layout="centered")
+st.title("📄 Horizon Topic Extractor")
+st.write("Upload a Horizon Europe PDF file and get an Excel sheet with parsed topics.")
+
+# ========== File Upload ==========
+uploaded_file = st.file_uploader("Upload a Horizon PDF", type=["pdf"])
 
 # ========== PDF Parsing ==========
-def extract_text_from_pdf(file_like: BytesIO) -> str:
-    with fitz.open(stream=file_like.read(), filetype="pdf") as doc:
+def extract_text_from_pdf(file):
+    with fitz.open(stream=file.read(), filetype="pdf") as doc:
         return "\n".join(page.get_text() for page in doc)
 
 # ========== Utility ==========
-def normalize_text(text: str) -> str:
+def normalize_text(text):
     text = text.replace('\r\n', '\n').replace('\r', '\n')
     text = re.sub(r"\xa0", " ", text)
     text = re.sub(r"[ \t]+", " ", text)
@@ -20,7 +25,7 @@ def normalize_text(text: str) -> str:
     return text.strip()
 
 # ========== Topic Extraction ==========
-def extract_topic_blocks(text: str) -> List[Dict[str, Any]]:
+def extract_topic_blocks(text):
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     fixed_lines = []
     i = 0
@@ -62,23 +67,23 @@ def extract_topic_blocks(text: str) -> List[Dict[str, Any]]:
     return topic_blocks
 
 # ========== Field Extraction ==========
-def extract_data_fields(topic: Dict[str, Any]) -> Dict[str, Any]:
+def extract_data_fields(topic):
     text = normalize_text(topic["full_text"])
 
-    def extract_budget(txt: str):
-        m = re.search(r"around\s+eur\s+([\d.,]+)", txt.lower())
-        if m:
-            return int(float(m.group(1).replace(",", "")) * 1_000_000)
-        m = re.search(r"between\s+eur\s+[\d.,]+\s+and\s+([\d.,]+)", txt.lower())
-        if m:
-            return int(float(m.group(1).replace(",", "")) * 1_000_000)
+    def extract_budget(text):
+        match = re.search(r"around\s+eur\s+([\d.,]+)", text.lower())
+        if match:
+            return int(float(match.group(1).replace(",", "")) * 1_000_000)
+        match = re.search(r"between\s+eur\s+[\d.,]+\s+and\s+([\d.,]+)", text.lower())
+        if match:
+            return int(float(match.group(1).replace(",", "")) * 1_000_000)
         return None
 
-    def extract_total_budget(txt: str):
-        m = re.search(r"indicative budget.*?eur\s?([\d.,]+)", txt.lower())
-        return int(float(m.group(1).replace(",", "")) * 1_000_000) if m else None
+    def extract_total_budget(text):
+        match = re.search(r"indicative budget.*?eur\s?([\d.,]+)", text.lower())
+        return int(float(match.group(1).replace(",", "")) * 1_000_000) if match else None
 
-    def get_section(keyword: str, stop_keywords: List[str]):
+    def get_section(keyword, stop_keywords):
         lines = text.splitlines()
         collecting = False
         section = []
@@ -93,8 +98,8 @@ def extract_data_fields(topic: Dict[str, Any]) -> Dict[str, Any]:
                 section.append(line)
         return "\n".join(section).strip() if section else None
 
-    def extract_type_of_action(txt: str):
-        lines = txt.splitlines()
+    def extract_type_of_action(text):
+        lines = text.splitlines()
         for i, line in enumerate(lines):
             if "type of action" in line.lower():
                 for j in range(i + 1, len(lines)):
@@ -102,16 +107,16 @@ def extract_data_fields(topic: Dict[str, Any]) -> Dict[str, Any]:
                         return lines[j].strip()
         return None
 
-    def extract_topic_title(txt: str):
-        lines = txt.strip().splitlines()
+    def extract_topic_title(text):
+        lines = text.strip().splitlines()
         title_lines = []
         found = False
         for line in lines:
             if not found:
-                m = re.match(r"^(HORIZON-[A-Za-z0-9-]+):\s*(.*)", line)
-                if m:
+                match = re.match(r"^(HORIZON-[A-Za-z0-9-]+):\s*(.*)", line)
+                if match:
                     found = True
-                    title_lines.append(m.group(2).strip())
+                    title_lines.append(match.group(2).strip())
             else:
                 if re.match(r"^\s*Call[:\-]", line, re.IGNORECASE):
                     break
@@ -119,11 +124,11 @@ def extract_data_fields(topic: Dict[str, Any]) -> Dict[str, Any]:
                     title_lines.append(line.strip())
         return " ".join(title_lines) if title_lines else None
 
-    def extract_call_name_topic(txt: str):
-        txt = normalize_text(txt)
-        m = re.search(r"(?i)^\s*Call:\s*(.+)$", txt, re.MULTILINE)
-        if m:
-            return m.group(1).strip()
+    def extract_call_name_topic(text):
+        text = normalize_text(text)
+        match = re.search(r"(?i)^\s*Call:\s*(.+)$", text, re.MULTILINE)
+        if match:
+            return match.group(1).strip()
         return None
 
     return {
@@ -139,100 +144,54 @@ def extract_data_fields(topic: Dict[str, Any]) -> Dict[str, Any]:
         )
     }
 
-# ========== Metadata (Opening / Deadlines / Destination) ==========
-def extract_metadata_blocks(text: str) -> Dict[str, Dict[str, Any]]:
-    """
-    Keeps single-deadline behaviour but writes into 'deadline1'.
-    Also detects two-stage forms like:
-      'Deadline(s): 23 Sep 2025 (First Stage), 14 Apr 2026 (Second Stage)'
-    and fills deadline1 / deadline2 accordingly.
-    """
+def extract_metadata_blocks(text):
     lines = normalize_text(text).splitlines()
 
-    metadata_map: Dict[str, Dict[str, Any]] = {}
-    current = {
+    metadata_map = {}
+    current_metadata = {
         "opening_date": None,
-        "deadline1": None,
-        "deadline2": None,
+        "deadline": None,
         "destination": None
     }
 
     topic_pattern = re.compile(r"^(HORIZON-[A-Z0-9\-]+):")
 
-    # Header variants (lenient startswith)
-    def is_opening(line: str) -> bool:
-        return line.lower().startswith(("opening:", "opening date:", "opens:"))
-
-    def is_deadline(line: str) -> bool:
-        return line.lower().startswith(("deadline", "deadlines", "deadline(s):", "cut-off", "cut off"))
-
-    def is_destination(line: str) -> bool:
-        return line.lower().startswith("destination")
-
-    # Date patterns
-    months = r"Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t|tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?"
-    date_wordy = re.compile(rf"\b(\d{{1,2}})\s+({months})\s+(\d{{4}})\b", re.IGNORECASE)   # 23 Sep 2025 / 23 September 2025
-    date_iso   = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")                                 # 2025-09-23
-    date_slash = re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b")                             # 23/09/2025
-
-    def find_dates(s: str) -> List[str]:
-        out: List[str] = []
-        out += [f"{d} {m} {y}" for d, m, y in date_wordy.findall(s)]
-        out += [f"{y}-{m}-{d}" for y, m, d in date_iso.findall(s)]
-        for d, m, y in date_slash.findall(s):  # assume dd/mm/yyyy
-            out.append(f"{int(y):04d}-{int(m):02d}-{int(d):02d}")
-        # de-dup preserve order
-        seen = set()
-        dedup = []
-        for v in out:
-            if v not in seen:
-                seen.add(v)
-                dedup.append(v)
-        return dedup
-
     collecting = False
-    for line in lines:
-        if is_opening(line):
-            dates = find_dates(line)
-            current["opening_date"] = dates[0] if dates else None
-            collecting = True
-            continue
+    for i, line in enumerate(lines):
+        lower = line.lower()
 
-        if is_deadline(line):
-            dates = find_dates(line)
-            # Keep legacy "one deadline" behaviour as Deadline1
-            current["deadline1"] = dates[0] if dates else None
-            # If a second date is present (two-stage), capture as Deadline2
-            current["deadline2"] = dates[1] if len(dates) > 1 else None
+        if lower.startswith("opening:"):
+            current_metadata["opening_date"] = re.search(r"(\d{1,2} \w+ \d{4})", line)
+            current_metadata["opening_date"] = (
+                current_metadata["opening_date"].group(1)
+                if current_metadata["opening_date"]
+                else None
+            )
+            current_metadata["deadline"] = None
             collecting = True
-            continue
 
-        if is_destination(line):
-            current["destination"] = line.split(":", 1)[-1].strip()
-            collecting = True
-            continue
+        elif collecting and lower.startswith("deadline"):
+            current_metadata["deadline"] = re.search(r"(\d{1,2} \w+ \d{4})", line)
+            current_metadata["deadline"] = (
+                current_metadata["deadline"].group(1)
+                if current_metadata["deadline"]
+                else None
+            )
 
-        if collecting:
-            m = topic_pattern.match(line)
-            if m:
-                code = m.group(1)
-                metadata_map[code] = {
-                    "opening_date": current.get("opening_date"),
-                    "deadline1": current.get("deadline1"),
-                    "deadline2": current.get("deadline2"),
-                    "destination": current.get("destination"),
-                }
+        elif collecting and lower.startswith("destination"):
+            current_metadata["destination"] = line.split(":", 1)[-1].strip()
+
+        elif collecting:
+            match = topic_pattern.match(line)
+            if match:
+                code = match.group(1)
+                metadata_map[code] = current_metadata.copy()
 
     return metadata_map
 
-# ========== Public API ==========
-def parse_pdf(file_like, *, source_filename: str = "", version_label: str = "Unknown", parsed_on_utc: str = "") -> pd.DataFrame:
-    """
-    Returns a DataFrame equivalent to your app's output,
-    but with 'Deadline1' and 'Deadline2' columns.
-    """
-    pdf_bytes = file_like.read()
-    raw_text = extract_text_from_pdf(BytesIO(pdf_bytes))
+# ========== Main Streamlit App ==========
+if uploaded_file:
+    raw_text = extract_text_from_pdf(uploaded_file)
 
     topic_blocks = extract_topic_blocks(raw_text)
     metadata_by_code = extract_metadata_blocks(raw_text)
@@ -250,8 +209,7 @@ def parse_pdf(file_like, *, source_filename: str = "", version_label: str = "Unk
         "Code": t["code"],
         "Title": t["title"],
         "Opening Date": t.get("opening_date"),
-        "Deadline1": t.get("deadline1"),           # ← single or first deadline
-        "Deadline2": t.get("deadline2"),           # ← second deadline when present
+        "Deadline": t.get("deadline"),
         "Destination": t.get("destination"),
         "Budget Per Project": t.get("budget_per_project"),
         "Total Budget": t.get("indicative_total_budget"),
@@ -262,10 +220,34 @@ def parse_pdf(file_like, *, source_filename: str = "", version_label: str = "Unk
         "Call Name": t.get("call"),
         "Expected Outcome": t.get("expected_outcome"),
         "Scope": t.get("scope"),
-        "Description": t.get("full_text"),
-        "Source Filename": source_filename,
-        "Version Label": version_label,
-        "Parsed On (UTC)": parsed_on_utc,
+        "Description": t.get("full_text")
     } for t in enriched])
 
-    return df
+    st.subheader("📊 Preview of Extracted Topics")
+    st.dataframe(df.drop(columns=["Description"]).head(10), use_container_width=True)
+
+    # ========== 🔍 New Word Search ==========
+    st.subheader("🔍 Search Topics by Keyword")
+    keyword = st.text_input("Enter keyword to filter topics:")
+
+    if keyword:
+        keyword = keyword.lower()
+        filtered_df = df[df.apply(lambda row: row.astype(str).str.lower().str.contains(keyword).any(), axis=1)]
+        filtered_df = filtered_df.drop_duplicates()
+
+        st.markdown(f"**Results containing keyword: `{keyword}`**")
+        st.dataframe(filtered_df.drop(columns=["Description"]), use_container_width=True)
+        st.write(f"🔎 Found {len(filtered_df)} matching topics.")
+
+    # ========== Download ==========
+    output = BytesIO()
+    df.to_excel(output, index=False)
+    output.seek(0)
+
+    st.success(f"✅ Extracted {len(df)} topics!")
+    st.download_button(
+        label="⬇️ Download Excel File",
+        data=output,
+        file_name="horizon_topics.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
